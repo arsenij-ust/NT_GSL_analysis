@@ -24,9 +24,14 @@ This repository contains following files:
 
 * substrate_graph.Rds - contains the used GSL network as igraph object
 * generating_network.Rmd - contains the steps of GSL network generation
-* functions.R - contain functions for: 1) Assign expression values to edges of an igraph object, 2) compute the reaction activity of a count matrix, 3) compute transition probabilities with different modes
+* read_xenabrowser_data.R - Code for reading the TCGA-GTEx-TARGET data, creating a SummarizedExperiment object, and subsetting it to TARGET
+* functions.R - contain functions for: 1) Assigning expression values to edges of an igraph object, 2) computing the reaction activity of a gene expression matrix, 3) computing transition probabilities with different adjustment options
 * NB_GNB_pathanalysis.Rmd - contains the full analysis with visualizations of the TARGET NB/GNB dataset
 * NB_GN_pathanalysis.Rmd - contains the full analysis with visualizations of the GSE147635 NB/GN dataset
+* NB_GN_FC_image.Rmd - Code for creating figures of the Ganglioside graph and fold-change dotplot (Neuroblastoma vs. Ganglioneuroma)
+* NB_GNB_FC_image.Rmd - Code for creating figures of the Ganglioside graph and fold-change dotplot (Neuroblastoma vs. Ganglioneuroblastoma)
+* NBmycn_GNB_FC_image.Rmd - Code for creating figures of the Ganglioside graph and fold-change dotplot (Neuroblastoma MYCN amplified vs. Ganglioneuroblastoma)
+* NBmycn_NB_FC_image.Rmd - Code for creating figures of the Ganglioside graph and fold-change dotplot (Neuroblastoma MYCN amplified vs. Neuroblastoma without MYCN amplification)
 
 # Notes
 

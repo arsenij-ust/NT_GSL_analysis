@@ -1,0 +1,253 @@
+---
+title: "Network generation"
+author:
+- name: Arsenij Ustjanzew (arsenij.ustjanzew@uni-mainz.de)<br><a href='https://www.unimedizin-mainz.de/imbei/'>IMBEI,
+    University Medical Center Mainz</a><br>
+date: "28.08.2023"
+output: 
+  bookdown::html_document2:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+    code_download: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#",
+  error = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+options(width = 100)
+```
+
+```{r echo=TRUE, warning=FALSE, message=FALSE, results='hide'}
+# libraries
+library(NetPathMiner)
+library(org.Hs.eg.db)
+library(igraph)
+library(ggraph)
+library(graphlayouts)
+library(SummarizedExperiment)
+library(DESeq2)
+library(DT)
+library(KEGGREST)
+library(rlang)
+library(visNetwork)
+library(pheatmap)
+```
+
+## Build metabolic network
+
+
+- "hsa00600" Sphingolipid metabolism
+- "hsa00601" Glycosphingolipid biosynthesis - lacto and neolacto series
+- "hsa00603" Glycosphingolipid biosynthesis - globo and isoglobo series
+- "hsa00604" Glycosphingolipid biosynthesis - ganglio series
+
+```{r echo=TRUE, warning=FALSE, message=FALSE}
+pathways <- c("hsa00600", "hsa00601", "hsa00603", "hsa00604")
+kgml_dir <- "./data/KGML/"
+
+if(!dir.exists(kgml_dir)) dir.create(kgml_dir)
+
+sapply(pathways, function(p){
+  kgml <- KEGGREST::keggGet(p, "kgml")
+  cat(kgml, file=paste0("./data/KGML/",p,".xml"),sep="\n",append=FALSE)
+})
+
+graph <- NetPathMiner::KGML2igraph(filename = kgml_dir)
+```
+
+Recurrent metabolites (H2o, CO2 etc.) are excluded.
+Disconnected nodes (metabolites, that are not connected through a reaction edge with the network) are excluded.
+We get a bipartite graph containing metabolites and reactions as nodes:
+
+**Number of verices:**
+```{r echo=FALSE}
+# number of verices
+length(V(graph))
+```
+
+**Number of edges:**
+```{r echo=FALSE}
+# number of edges
+length(E(graph))
+```
+
+```{r echo=FALSE}
+type <- rep("m", length(V(graph)))
+type[V(graph) %in% V(graph)[ reactions ]] <- "r"
+
+ggraph(graph,layout = "stress")+
+  geom_edge_link(edge_colour = "grey66",edge_width = 0.5, 
+                  arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')),
+                  end_cap = circle(1, 'mm'))+
+  geom_node_point(aes(fill=factor(type)), shape = 21 ,size = 3)+
+  geom_node_text(aes(label = name, color=type),family = "serif",repel = TRUE, show.legend = FALSE)+
+  scale_color_brewer(palette="Set1")+
+  scale_fill_discrete(name="Type of edges", labels=c("Metabolite","Reaction"))+
+  theme_graph()+
+  theme(legend.position = "bottom")
+```
+
+The following step removes metabolite nodes keeping them as edge attributes. The resulting network contains reaction nodes only, where edges indicate that a metabolite produced by one reaction is consumed by the other.
+
+```{r echo=TRUE}
+mgraph <- makeMetaboliteNetwork(graph)
+```
+
+```{r echo=TRUE}
+#fix attr of vertices in mgraph object
+mgraph_V_attr <- unlist(V(mgraph)$attr)
+mgraph <- set_vertex_attr(graph= mgraph, name= "miriam.kegg.compound", value= mgraph_V_attr)
+mgraph <- delete_vertex_attr(graph= mgraph, name= "attr")
+#View(igraph::as_data_frame(mgraph, "vertices"))
+```
+
+```{r echo=TRUE}
+# fix attr of edges in mgraph object
+mgraph_E_attr <- as.data.frame(do.call(rbind, E(mgraph)$attr))
+for(c in colnames(mgraph_E_attr)){
+  mgraph <- set_edge_attr(graph= mgraph, name = c, value = mgraph_E_attr[[c]])
+}
+
+mgraph <- delete_edge_attr(graph= mgraph, name= "attr")
+mgraph <- delete_edge_attr(graph= mgraph, name= "reactant.stoichiometry")
+mgraph <- delete_edge_attr(graph= mgraph, name= "product.stoichiometry")
+mgraph <- delete_edge_attr(graph= mgraph, name= "kinetics")
+
+View(igraph::as_data_frame(mgraph))
+View(igraph::as_data_frame(mgraph, "vertices"))
+```
+
+As we can see, the network contains isolated structures. We can find out, how much isolated "subgraphs" exist:
+
+```{r echo=FALSE}
+vn.mgraph <- toVisNetworkData(mgraph)
+visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+```
+
+```{r echo=TRUE}
+#components(mgraph)
+split(names(V(mgraph)), components(mgraph)$membership)
+```
+
+The two big isolated subnetworks (1 & 2) are caused because there are two different IDs for Lactosylceramide (C01290 & G00092). We merge the two vertices C01290 & G00092 and finally remove the vertex G00092. 
+
+```{r}
+#V(mgraph)$name <- as.numeric(seq(1, length(V(mgraph))))
+nodes <- 1:vcount(mgraph)
+nodes[16] <- 36
+
+mgraph <- contract.vertices(graph=mgraph, mapping=nodes, vertex.attr.comb=list("first"))
+mgraph <- delete.vertices(mgraph, 16)
+
+V(mgraph)[[16]]$name <- 36
+V(mgraph)[[16]]$miriam.kegg.compound <- "00092"
+
+View(igraph::as_data_frame(mgraph))
+View(igraph::as_data_frame(mgraph, "vertices"))
+```
+
+```{r echo=FALSE}
+vn.mgraph <- toVisNetworkData(mgraph)
+visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+```
+
+```{r echo=TRUE}
+#components(mgraph)
+split(names(V(mgraph)), components(mgraph)$membership)
+```
+
+
+The two big isolated subnetworks (1 & 2) are caused because there are two different IDs for Lactosylceramide (C01290 & G00092). In the following step, we connect these two subnetworks by 
+* removing the node C01290 (LacCer) and 
+* connecting C01190 (Glucosylceramide) with G00092 (LacCer) by adding two new edges (identical to the removed edges between C01290 and C01190)
+* TODO: connecting C03405 (Lactosylceramide sulfate) with G00092 (LacCer) by adding two new edges (identical to the removed edges between C03405 and C01190)
+
+**Number of verices:**
+```{r echo=FALSE}
+# number of verices
+length(V(mgraph))
+```
+
+**Number of edges:**
+```{r echo=FALSE}
+# number of edges
+length(E(mgraph))
+```
+
+Use edge attribute `miriam.ncbigene` to map the NCBI gene IDs to `SYMBOL` and `ENSEMBLE` with the package `org.Hs.eg.db`.
+
+```{r results=FALSE}
+# 
+# edge_attr(graph = mgraph, name = "symbol") <- list(list())
+# edge_attr(graph = mgraph, name = "ensembl") <- list(list())
+for(e in seq(1:length(E(mgraph)))){
+  # print(edge_attr(graph = mgraph, name = "miriam.ncbigene", index = e)[[1]])
+  miriam.ncbigene <- edge_attr(graph = mgraph, name = "miriam.ncbigene", index = e)[[1]]
+  if(!is.null(miriam.ncbigene)){
+    miriam.symbol <- mapIds(org.Hs.eg.db, keys = miriam.ncbigene, keytype = "ENTREZID", column="SYMBOL")
+    print(miriam.symbol)
+    miriam.ensembl <- mapIds(org.Hs.eg.db, keys = miriam.ncbigene, keytype = "ENTREZID", column="ENSEMBL")
+    print(miriam.ensembl)
+  }
+  edge_attr(graph = mgraph, name = "symbol", index = e) <- list(miriam.symbol)
+  edge_attr(graph = mgraph, name = "ensembl", index = e) <- list(miriam.ensembl)
+}
+```
+
+**Overview of the edges including their attributes:**
+
+```{r echo=FALSE}
+DT::datatable(as_data_frame(mgraph))
+```
+
+**Assign readable names to vertices**
+
+```{r echo=TRUE}
+labels <- sapply(names(V(mgraph)), function(x){
+  l <- keggFind("glycan", x)
+  if(rlang::is_empty(l)){
+    l <- keggFind("compound", x)
+  }
+  unlist(strsplit(l, ";"))[1]
+})
+
+if(length(V(mgraph)) == length(labels)){
+  mgraph <- set.vertex.attribute(mgraph, "label", value=labels)
+  DT::datatable(as_data_frame(mgraph, "vertices")[,-c(1)])
+}
+
+# save for later use
+saveRDS(mgraph, "./data/substrate_graph.Rds")
+```
+
+```{r echo=FALSE}
+vn.mgraph <- toVisNetworkData(mgraph, idToLabel = FALSE)
+visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+```
+
+## Identify target features
+
+```{r echo=TRUE}
+target_features_df <- data.frame(
+  Ensembl = unique(unlist(edge_attr(mgraph, "ensembl"))),
+  Symbol = unique(unlist(edge_attr(mgraph, "symbol"))),
+  NCBI_IDs = unique(unlist(edge_attr(mgraph, "miriam.ncbigene"))))
+
+# save for later purpose
+#saveRDS(target_features_df, "../data/metabolic_graphs/target_features.Rds")
+
+DT::datatable(target_features_df)
+```
+
+

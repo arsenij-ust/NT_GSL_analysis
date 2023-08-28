@@ -1,0 +1,1065 @@
+---
+title: "GN & Neuroblastoma - pathanalysis"
+author:
+- name: Arsenij Ustjanzew (arsenij.ustjanzew@uni-mainz.de)<br><a href='https://www.unimedizin-mainz.de/imbei/'>IMBEI,
+    University Medical Center Mainz</a><br>
+date: "22.02.2023"
+output: 
+  bookdown::html_document2:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: hide
+    code_download: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load necessary packages
+
+```{r echo=TRUE, warning=FALSE, message=FALSE, results='hide'}
+setwd("/home/rstudio/")
+library("SummarizedExperiment")
+library("DT")
+library("DESeq2")
+library("org.Hs.eg.db")
+library("pheatmap")
+library("dplyr")
+#devtools::install_github("vqv/ggbiplot")
+library("ggbiplot")
+library("KEGGREST")
+library("viridis")
+library("igraph")
+library("visNetwork")
+library("EnhancedVolcano")
+library("magrittr")
+
+source("edge_probability_functions.R")
+```
+
+# Data set analysis: GN vs. Neuroblastoma
+
+
+# Read data
+
+```{r}
+# load graph
+mgraph <- readRDS("./data/substrate_graph.Rds")
+
+# delete edges HEX-A/B 
+
+mgraph %<>% delete_edges("00109|00108")
+mgraph %<>% delete_edges("00110|00109")
+
+vn.mgraph <- toVisNetworkData(mgraph, idToLabel = FALSE)
+vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
+
+# 118 edges (reaction R01281 is duplicated once)
+# edge_df <- igraph::as_data_frame(mgraph)
+```
+
+
+```{r warning=FALSE, message=FALSE}
+counts_dir <- "./data/GSE147635-counts"
+count_files <- list.files(counts_dir)
+
+# initialize an empty data.frame
+file_path <- file.path(counts_dir, count_files[1])
+df <- read.table(file_path, header = FALSE, sep = "\t")
+names(df) <- c("rowname", count_files[1])
+
+# loop through each file and bind it to the data.frame
+for (file in count_files[2:length(count_files)]) {
+  file_path <- file.path(counts_dir, file)
+  print(file_path)
+  temp_df <- read.table(file_path, header = FALSE, sep = "\t")
+  names(temp_df) <- c("rowname", file)
+  # rownames(temp_df) <- temp_df[,"rowname"]
+  # print(head(temp_df))
+  df <- cbind(df, temp_df[,file, drop=FALSE])
+}
+```
+
+# Create count matrix, colData & rowData
+
+```{r warning=FALSE, message=FALSE}
+# column "rowname" as rownames
+rownames(df) <- df$rowname
+df <- df[,-1]
+
+# fix colnames
+colnames(df)  <- gsub("_count.tsv","",colnames(df))
+
+# remove NB_CL samples
+NB_CL <- c("SRR11434496", "SRR11434497", "SRR11434498")
+df <- df[,-which(colnames(df)==NB_CL)]
+
+#coldata
+coldata_NB_GN <- data.frame(type=c(rep("GN", 6), rep("NB", 15)))
+rownames(coldata_NB_GN) <- colnames(df)
+
+#rowdata
+ensemblIDs <- gsub("\\..*", "", rownames(df))
+geneSymbol <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = ensemblIDs, keytype = "ENSEMBL", column="SYMBOL")
+entrezIDs <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = ensemblIDs, keytype = "ENSEMBL", column="ENTREZID")
+
+rowdata <- data.frame(ensemblIDs = ensemblIDs, geneSymbol = geneSymbol, entrezIDs = entrezIDs, row.names = rownames(df))
+
+all(colnames(df) == rownames(coldata_NB_GN))
+```
+
+
+```{r}
+# create DDS object
+NB_GN_dds <- DESeq2::DESeqDataSetFromMatrix(df, coldata_NB_GN, design=~type)
+rowData(NB_GN_dds) <- rowdata
+
+
+# gene symbol as row name
+NB_GN_dds <- NB_GN_dds[which(!is.na(rowData(NB_GN_dds)$geneSymbol)),]
+NB_GN_dds <- NB_GN_dds[-duplicated(rowData(NB_GN_dds)$geneSymbol),]
+rownames(NB_GN_dds) <- rowData(NB_GN_dds)$geneSymbol
+```
+
+Filtering genes with less then 10 counts in sum for all samples
+
+```{r}
+keep <- rowSums(counts(NB_GN_dds)) >= 10
+NB_GN_dds <- NB_GN_dds[keep,]
+```
+
+# Normalization & log10 +1
+
+```{r}
+NB_GN_dds <- estimateSizeFactors(NB_GN_dds)
+
+norm_counts <- DESeq2::counts(NB_GN_dds, normalized=TRUE)
+norm_counts <- log10(norm_counts + 1)
+
+saveRDS(NB_GN_dds, "NB_GN_dds_GSE147635.Rds")
+```
+
+# Distance matrix
+
+```{r, fig.height= 18, , fig.width = 18}
+vsd <- vst(NB_GN_dds, blind=FALSE)
+sampleDists <- dist(t(assay(vsd)))
+
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- as.character(vsd$type)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix)
+```
+
+# Assign gene expression to graph and compute reaction activity score (RAS)
+
+```{r}
+# create reaction activity matrix; weights are the sum of genes involved in the reaction
+ras <- compute_reaction_activity(mgraph, norm_counts)
+
+# create weighted graph per sample; weights are the sum of genes involved in the reaction
+graph_list <- compute_reaction_activity(mgraph, norm_counts, output_graph=TRUE)
+```
+
+# Compute transition probability matrix
+
+```{r}
+# transition matrix (equal to random walker with max-steps 1)
+transition_probability <- compute_transition_probablity(graph_list, "edge_sum", "miriam.kegg.reaction", target_node=NULL)
+
+# transition matrix, where the product of the transition probabilities of all simple paths from the target_node are calculated  
+transition_probability_paths <- compute_transition_probablity(graph_list, "edge_sum", "miriam.kegg.reaction", target_node="C01290")
+
+# transition matrix, where if the transition probability = 1 is replaced by the recursively previous max. transition probability 
+transition_probability_rec <- compute_transition_probablity(graph_list, "edge_sum", "miriam.kegg.reaction", target_node=NULL, pass_through=TRUE)
+```
+
+# Adjust RAS by transition probabilities
+
+```{r}
+r <- intersect(rownames(ras), rownames(transition_probability))
+ras_prob <- ras[r,] * transition_probability[r,]
+ras_prob_path <- ras[r,] * transition_probability_paths[r,]
+ras_prob_rec <- ras[r,] * transition_probability_rec[r,]
+
+ras_prob_up <- ras[r,] + (ras[r,] * transition_probability[r,])
+ras_prob_up_path <- ras[r,] + (ras[r,] * transition_probability_paths[r,])
+ras_prob_up_rec <- ras[r,] + (ras[r,] * transition_probability_rec[r,])
+```
+
+# RAS
+
+```{r warning=FALSE, message=FALSE}
+p.vals <- sapply(1:nrow(ras), function(x){
+  ks.test(ras[x, which(colData(NB_GN_dds)$type=="NB")],ras[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
+})
+pval_df <- data.frame(reaction=rownames(ras), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
+log2fc <- sapply(1:nrow(ras), function(x){
+  log2(mean(ras[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras[x, which(colData(NB_GN_dds)$type=="GN")]))
+})
+pval_df$log2fc <- log2fc
+rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
+
+pval_df$NB <- rowMeans(ras[, which(colData(NB_GN_dds)$type=="NB")])
+pval_df$GN <- rowMeans(ras[, which(colData(NB_GN_dds)$type=="GN")])
+
+# lower_ci_NB <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_NB <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
+# })
+# lower_ci_GN <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_GN <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
+# })
+
+pval_df$sd_NB <- sapply(1:nrow(ras), function(x){
+  sd(ras[x, which(colData(NB_GN_dds)$type=="NB")])
+})
+pval_df$sd_GN <- sapply(1:nrow(ras), function(x){
+  sd(ras[x, which(colData(NB_GN_dds)$type=="GN")])
+})
+
+writexl::write_xlsx(pval_df, "./data/NB_GN_FC_images/NB_GN_ras_tbl_FCstatistic.xlsx")
+```
+
+```{r fig.width = 10, fig.height=10}
+vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
+vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
+
+
+vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
+vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
+
+vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
+vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
+vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
+vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
+
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+# 
+# # compounds of gangliosphingolipid
+# comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+# comps <- gsub("G", "", comps)
+# comps[1] <- "C01290"
+# 
+# vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
+# 
+# vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
+# vn.mgraph$nodes$level <- c(
+#   "Lactosylceramide" = 1,
+#   "GM1" = 3,
+#   "GM2" = 2,
+#   "GD3" = 1,
+#   "GT2" = 2,
+#   "GT3" = 1,
+#   "GD1b" = 3,
+#   "GT1b" = 4,
+#   "GD1a" = 4,
+#   "GM1b" = 4,
+#   "GM3" = 1,
+#   "GD2" = 2,
+#   "GA2" = 2,
+#   "GA1" = 3,
+#   "GT1c" = 3,
+#   "GQ1b" = 5,
+#   "GQ1balpha" = 5,
+#   "GT1aalpha" = 5,
+#   "GT1a" = 5,
+#   "GD1c" = 5,
+#   "GD1a1" = 4)
+# # 
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
+#   visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
+#   visNodes(shape = 'box') %>% 
+#   visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1) %>%
+#   visPhysics(enabled = FALSE)
+
+```
+
+```{r}
+create_graph <- function(mgraph){
+  # compounds of gangliosphingolipid
+  comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+  comps <- gsub("G", "", comps)
+  comps[1] <- "C01290"
+  
+  mgraph_sub <- subgraph(mgraph, which(V(mgraph)$name %in% comps))
+  
+  V(mgraph_sub)$label[which(V(mgraph_sub)$miriam.kegg.compound == "00127")] <- "GD1alpha"
+  
+  mylay <- layout.auto(mgraph_sub)
+  rownames(mylay) <- V(mgraph_sub)$name
+  
+  mylay["C01290",] <-c(-6,0)
+  mylay["00108",] <-c(4,0)
+  mylay["00113",] <-c(12,0)
+  mylay["00118",] <-c(20,0)
+  mylay["00123",] <-c(-4,-4)
+  mylay["00109",] <-c(4,-4)
+  mylay["00114",] <-c(12,-4)
+  mylay["00119",] <-c(20,-4)
+  mylay["00124",] <-c(-4,-8)
+  mylay["00110",] <-c(4,-8)
+  mylay["00115",] <-c(12,-8)
+  mylay["00120",] <-c(20,-8)
+  mylay["00125",] <-c(-4,-12)
+  mylay["00111",] <-c(4,-12)
+  mylay["00116",] <-c(12,-12)
+  mylay["00127",] <-c(-6.2,-18)
+  mylay["00126",] <-c(-1.2,-16)
+  mylay["00128",] <-c(1.8,-18)
+  mylay["00112",] <-c(6.2,-16)
+  mylay["00129",] <-c(9.8,-18)
+  mylay["00117",] <-c(14.2,-16)
+  
+  V(mgraph_sub)$shape <- "rectangle"
+  V(mgraph_sub)$size <- 100
+  V(mgraph_sub)$size <- 35
+  V(mgraph_sub)["C01290"]$size <- 75
+  V(mgraph_sub)["00128"]$size <- 50
+  V(mgraph_sub)["00129"]$size <- 50
+  V(mgraph_sub)["00127"]$size <- 50
+  V(mgraph_sub)$label.cex <- 1
+  V(mgraph_sub)$color <- "lightblue"
+  r.id <- unlist(get.edge.attribute(mgraph_sub,'miriam.kegg.reaction'))
+  mgraph_sub <- set_edge_attr(mgraph_sub, "log2fc", index = E(mgraph_sub), pval_df[r.id,"log2fc"])
+  mgraph_sub <- set_edge_attr(mgraph_sub, "color", index = E(mgraph_sub), "NA")
+  mgraph_sub <- set_edge_attr(mgraph_sub, "padj", index = E(mgraph_sub), pval_df[r.id,"padj"])
+  E(mgraph_sub)$width <- abs(as.numeric(E(mgraph_sub)$log2fc)) * 40
+  
+  E(mgraph_sub)$color <- ifelse(E(mgraph_sub)$log2fc < 0, "blue", "red")
+  # E(mgraph_sub)$color <- ifelse(E(mgraph_sub)$log2fc < 0, "blue", "red")
+  E(mgraph_sub)$color[which(E(mgraph_sub)$padj > 0.05)] <- "grey"
+  return(mgraph_sub)
+}
+```
+
+
+```{r}
+mgraph_sub <- create_graph(mgraph)
+# sapply(E(mgraph_sub)$log2fc, is.greaterFoldChange)
+png("./data/NB_GN_FC_images/NB_GN_graph_ras.png", width = 2800, height = 2800, units = "px", pointsize = 20, res="300")
+par(omi=c(0,0,0,0), mgp=c(0,0,0),mar=c(0,0,0,0))
+plot(mgraph_sub, layout=mylay, vertex.label.color= "black", vertex.label.family= "Arial")
+dev.off()
+```
+
+```{r}
+e_df <- as.data.frame(vn.mgraph$edges)
+
+# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
+#   geom_point(aes(size=-log10(padj), color=log2fc)) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic()
+# 
+# 
+# 
+# 
+# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
+#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic() + 
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   xlab("from node") + ylab("to node")
+
+
+
+# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
+#   geom_point(aes(size=-log10(padj), color=log2fc)) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic()
+# 
+# 
+# 
+# 
+# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
+#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic() + 
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   xlab("from node") + ylab("to node")
+
+e_df_lg <- e_df %>%
+  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
+e_df_lg$group <- as.factor(e_df_lg$group)
+e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
+e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
+
+e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN))  
+
+# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
+#   geom_point(aes(color=-log10(padj))) + 
+#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+#   facet_wrap(~group, ncol = 3) + 
+#   theme_classic() + 
+#   theme(panel.grid.major.y = element_line(color = "gray",
+#                                           size = 0.5,
+#                                           linetype = 1)) + xlab("")
+
+
+comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+comps <- gsub("G", "", comps)
+comps[1] <- "C01290"
+comps <- c(comps, "C01190")
+
+e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
+e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
+from_label <- c()
+for(i in e_df_lg$from){
+  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$from_label <- from_label
+to_label <- c()
+for(i in e_df_lg$to){
+  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$to_label <- to_label
+
+# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
+  
+p1 <- ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
+  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
+  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
+  geom_point(aes(color=-log10(padj))) +
+  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+  facet_wrap(~group, ncol = 3, scales="free_x") + 
+  theme_classic() +
+  ylab("") + xlab("") +
+  theme(panel.grid.major.y = element_line(color = "lightgray",
+                                          size = 0.5,
+                                          linetype = 1)) + xlab("")
+ggsave(
+  "NB_GN_FC_ras.png",
+  plot = p1,
+  device = "png",
+  path = "./data/NB_GN_FC_images/",
+  scale = 1,
+  width = 2800,
+  height = 1500,
+  units = "px",
+  dpi = 300,
+  limitsize = FALSE,
+  bg = NULL,
+)
+```
+
+# RAS prob
+
+```{r warning=FALSE, message=FALSE}
+p.vals <- sapply(1:nrow(ras_prob), function(x){
+  # print(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")])
+  ks.test(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")],ras_prob[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
+})
+pval_df <- data.frame(reaction=rownames(ras_prob), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
+log2fc <- sapply(1:nrow(ras_prob), function(x){
+  log2(mean(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")]))
+})
+pval_df$log2fc <- log2fc
+rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
+
+pval_df$NB <- rowMeans(ras_prob[, which(colData(NB_GN_dds)$type=="NB")])
+pval_df$GN <- rowMeans(ras_prob[, which(colData(NB_GN_dds)$type=="GN")])
+
+# lower_ci_NB <- sapply(1:nrow(ras_prob), function(x){
+#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_NB <- sapply(1:nrow(ras_prob), function(x){
+#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
+# })
+# lower_ci_GN <- sapply(1:nrow(ras_prob), function(x){
+#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_GN <- sapply(1:nrow(ras_prob), function(x){
+#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
+# })
+
+pval_df$sd_NB <- sapply(1:nrow(ras_prob), function(x){
+  sd(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")])
+})
+pval_df$sd_GN <- sapply(1:nrow(ras_prob), function(x){
+  sd(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")])
+})
+
+writexl::write_xlsx(pval_df, "./data/NB_GN_FC_images/NB_GN_ras_prob_tbl_FCstatistic.xlsx")
+```
+
+```{r fig.width = 10, fig.height=10}
+vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
+vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
+
+
+vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
+vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
+
+vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
+vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
+vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
+vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
+
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+# 
+# # compounds of gangliosphingolipid
+# comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+# comps <- gsub("G", "", comps)
+# comps[1] <- "C01290"
+# 
+# vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
+# 
+# vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
+# vn.mgraph$nodes$level <- c(
+#   "Lactosylceramide" = 1,
+#   "GM1" = 3,
+#   "GM2" = 2,
+#   "GD3" = 1,
+#   "GT2" = 2,
+#   "GT3" = 1,
+#   "GD1b" = 3,
+#   "GT1b" = 4,
+#   "GD1a" = 4,
+#   "GM1b" = 4,
+#   "GM3" = 1,
+#   "GD2" = 2,
+#   "GA2" = 2,
+#   "GA1" = 3,
+#   "GT1c" = 3,
+#   "GQ1b" = 5,
+#   "GQ1balpha" = 5,
+#   "GT1aalpha" = 5,
+#   "GT1a" = 5,
+#   "GD1c" = 5,
+#   "GD1a1" = 4)
+# # 
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
+#   visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
+#   visNodes(shape = 'box') %>% 
+#   visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1) %>%
+#   visPhysics(enabled = FALSE)
+
+```
+
+```{r}
+mgraph_sub <- create_graph(mgraph)
+
+png("./data/NB_GN_FC_images/NB_GN_graph_ras_prob.png", width = 2800, height = 2800, units = "px", pointsize = 20, res="300")
+par(omi=c(0,0,0,0), mgp=c(0,0,0),mar=c(0,0,0,0))
+plot(mgraph_sub, layout=mylay, vertex.label.color= "black", vertex.label.family= "Arial")
+dev.off()
+```
+
+```{r}
+e_df <- as.data.frame(vn.mgraph$edges)
+
+# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
+#   geom_point(aes(size=-log10(padj), color=log2fc)) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic()
+# 
+# 
+# 
+# 
+# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
+#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic() + 
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   xlab("from node") + ylab("to node")
+
+e_df_lg <- e_df %>%
+  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
+e_df_lg$group <- as.factor(e_df_lg$group)
+e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
+e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
+
+e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
+
+# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
+#   geom_point(aes(color=-log10(padj))) + 
+#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+#   facet_wrap(~group, ncol = 3) + 
+#   theme_classic() + 
+#   theme(panel.grid.major.y = element_line(color = "gray",
+#                                           size = 0.5,
+#                                           linetype = 1)) + xlab("")
+
+
+comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+comps <- gsub("G", "", comps)
+comps[1] <- "C01290"
+comps <- c(comps, "C01190")
+
+e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
+e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
+from_label <- c()
+for(i in e_df_lg$from){
+  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$from_label <- from_label
+to_label <- c()
+for(i in e_df_lg$to){
+  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$to_label <- to_label
+
+# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
+  
+p2 <- ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
+  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
+  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
+  geom_point(aes(color=-log10(padj))) +
+  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+  facet_wrap(~group, ncol = 3, scales="free_x") + 
+  theme_classic() +
+  ylab("") + xlab("") +
+  theme(panel.grid.major.y = element_line(color = "lightgray",
+                                          size = 0.5,
+                                          linetype = 1)) + xlab("")
+
+ggsave(
+  "NB_GN_FC_ras_prob.png",
+  plot = p2,
+  device = "png",
+  path = "./data/NB_GN_FC_images/",
+  scale = 1,
+  width = 2800,
+  height = 1500,
+  units = "px",
+  dpi = 300,
+  limitsize = FALSE,
+  bg = NULL,
+)
+```
+
+# RAS prob rec
+
+```{r warning=FALSE, message=FALSE}
+p.vals <- sapply(1:nrow(ras_prob_rec), function(x){
+  # print(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")])
+  ks.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")],ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
+})
+pval_df <- data.frame(reaction=rownames(ras_prob_rec), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
+log2fc <- sapply(1:nrow(ras_prob_rec), function(x){
+  log2(mean(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")]))
+})
+pval_df$log2fc <- log2fc
+rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
+
+pval_df$NB <- rowMeans(ras_prob_rec[, which(colData(NB_GN_dds)$type=="NB")])
+pval_df$GN <- rowMeans(ras_prob_rec[, which(colData(NB_GN_dds)$type=="GN")])
+# lower_ci_NB <- sapply(1:nrow(ras_prob_rec), function(x){
+#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_NB <- sapply(1:nrow(ras_prob_rec), function(x){
+#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
+# })
+# lower_ci_GN <- sapply(1:nrow(ras_prob_rec), function(x){
+#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_GN <- sapply(1:nrow(ras_prob_rec), function(x){
+#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
+# })
+
+pval_df$sd_NB <- sapply(1:nrow(ras_prob_rec), function(x){
+  sd(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")])
+})
+pval_df$sd_GN <- sapply(1:nrow(ras_prob_rec), function(x){
+  sd(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")])
+})
+
+writexl::write_xlsx(pval_df, "./data/NB_GN_FC_images/NB_GN_ras_prob_rec_tbl_FCstatistic.xlsx")
+```
+
+```{r fig.width = 10, fig.height=10}
+vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
+vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
+
+
+vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
+vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
+
+vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
+vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
+vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
+vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
+
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+# 
+# # compounds of gangliosphingolipid
+# comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+# comps <- gsub("G", "", comps)
+# comps[1] <- "C01290"
+# 
+# vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
+# 
+# vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
+# vn.mgraph$nodes$level <- c(
+#   "Lactosylceramide" = 1,
+#   "GM1" = 3,
+#   "GM2" = 2,
+#   "GD3" = 1,
+#   "GT2" = 2,
+#   "GT3" = 1,
+#   "GD1b" = 3,
+#   "GT1b" = 4,
+#   "GD1a" = 4,
+#   "GM1b" = 4,
+#   "GM3" = 1,
+#   "GD2" = 2,
+#   "GA2" = 2,
+#   "GA1" = 3,
+#   "GT1c" = 3,
+#   "GQ1b" = 5,
+#   "GQ1balpha" = 5,
+#   "GT1aalpha" = 5,
+#   "GT1a" = 5,
+#   "GD1c" = 5,
+#   "GD1a1" = 4)
+# # 
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
+#   visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
+#   visNodes(shape = 'box') %>% 
+#   visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1) %>%
+#   visPhysics(enabled = FALSE)
+
+```
+
+```{r}
+mgraph_sub <- create_graph(mgraph)
+
+png("./data/NB_GN_FC_images/NB_GN_graph_ras_prob_rec.png", width = 2800, height = 2800, units = "px", pointsize = 20, res="300")
+par(omi=c(0,0,0,0), mgp=c(0,0,0),mar=c(0,0,0,0))
+plot(mgraph_sub, layout=mylay, vertex.label.color= "black", vertex.label.family= "Arial")
+dev.off()
+```
+
+```{r}
+e_df <- as.data.frame(vn.mgraph$edges)
+
+# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
+#   geom_point(aes(size=-log10(padj), color=log2fc)) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic()
+# 
+# 
+# 
+# 
+# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
+#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic() + 
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   xlab("from node") + ylab("to node")
+
+e_df_lg <- e_df %>%
+  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
+e_df_lg$group <- as.factor(e_df_lg$group)
+e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
+e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
+
+e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
+
+# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
+#   geom_point(aes(color=-log10(padj))) + 
+#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+#   facet_wrap(~group, ncol = 3) + 
+#   theme_classic() + 
+#   theme(panel.grid.major.y = element_line(color = "gray",
+#                                           size = 0.5,
+#                                           linetype = 1)) + xlab("")
+
+
+comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+comps <- gsub("G", "", comps)
+comps[1] <- "C01290"
+comps <- c(comps, "C01190")
+
+e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
+e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
+from_label <- c()
+for(i in e_df_lg$from){
+  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$from_label <- from_label
+to_label <- c()
+for(i in e_df_lg$to){
+  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$to_label <- to_label
+
+# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
+  
+p3 <- ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
+  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
+  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
+  geom_point(aes(color=-log10(padj))) +
+  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+  facet_wrap(~group, ncol = 3, scales="free_x") + 
+  theme_classic() +
+  ylab("") + xlab("") +
+  theme(panel.grid.major.y = element_line(color = "lightgray",
+                                          size = 0.5,
+                                          linetype = 1)) + xlab("")
+
+ggsave(
+  "NB_GN_FC_ras_prob_rec.png",
+  plot = p3,
+  device = "png",
+  path = "./data/NB_GN_FC_images/",
+  scale = 1,
+  width = 2800,
+  height = 1500,
+  units = "px",
+  dpi = 300,
+  limitsize = FALSE,
+  bg = NULL,
+)
+```
+
+# RAS prob path
+
+```{r warning=FALSE, message=FALSE}
+
+# ras_prob_path2 <- ras_prob_path[!apply(ras_prob_path, 1, function(x) all(x==0)), ]
+ras_prob_path2 <- as.matrix(ras_prob_path)
+
+p.vals <- sapply(1:nrow(ras_prob_path2), function(x){
+  # print(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")])
+  ks.test(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")],ras_prob_path2[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
+})
+pval_df <- data.frame(reaction=rownames(ras_prob_path2), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
+log2fc <- sapply(1:nrow(ras_prob_path2), function(x){
+  log2(mean(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="GN")]))
+})
+pval_df$log2fc <- log2fc
+rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
+
+pval_df[which(is.nan(pval_df$log2fc)),"log2fc"] <- 0
+
+pval_df$NB <- rowMeans(ras_prob_path2[, which(colData(NB_GN_dds)$type=="NB")])
+pval_df$GN <- rowMeans(ras_prob_path2[, which(colData(NB_GN_dds)$type=="GN")])
+
+# lower_ci_NB <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_NB <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
+# })
+# lower_ci_GN <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
+# })
+# upper_ci_GN <- sapply(1:nrow(ras), function(x){
+#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
+# })
+
+pval_df$sd_NB <- sapply(1:nrow(ras_prob_path2), function(x){
+  sd(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")])
+})
+pval_df$sd_GN <- sapply(1:nrow(ras_prob_path2), function(x){
+  sd(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="GN")])
+})
+
+writexl::write_xlsx(pval_df, "./data/NB_GN_FC_images/NB_GN_ras_prob_path_tbl_FCstatistic.xlsx")
+```
+
+```{r fig.width = 10, fig.height=10}
+vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
+vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
+
+
+vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
+vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
+
+vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
+vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
+vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
+vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
+
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
+# 
+# # compounds of gangliosphingolipid
+# comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+# comps <- gsub("G", "", comps)
+# comps[1] <- "C01290"
+# 
+# vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
+# 
+# vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
+# vn.mgraph$nodes$level <- c(
+#   "Lactosylceramide" = 1,
+#   "GM1" = 3,
+#   "GM2" = 2,
+#   "GD3" = 1,
+#   "GT2" = 2,
+#   "GT3" = 1,
+#   "GD1b" = 3,
+#   "GT1b" = 4,
+#   "GD1a" = 4,
+#   "GM1b" = 4,
+#   "GM3" = 1,
+#   "GD2" = 2,
+#   "GA2" = 2,
+#   "GA1" = 3,
+#   "GT1c" = 3,
+#   "GQ1b" = 5,
+#   "GQ1balpha" = 5,
+#   "GT1aalpha" = 5,
+#   "GT1a" = 5,
+#   "GD1c" = 5,
+#   "GD1a1" = 4)
+# # 
+# visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
+#   visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
+#   visNodes(shape = 'box') %>% 
+#   visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1) %>%
+#   visPhysics(enabled = FALSE)
+
+```
+
+```{r}
+mgraph_sub <- create_graph(mgraph)
+
+png("./data/NB_GN_FC_images/NB_GN_graph_ras_prob_path.png", width = 2800, height = 2800, units = "px", pointsize = 20, res="300")
+par(omi=c(0,0,0,0), mgp=c(0,0,0),mar=c(0,0,0,0))
+plot(mgraph_sub, layout=mylay, vertex.label.color= "black", vertex.label.family= "Arial")
+dev.off()
+```
+
+```{r}
+e_df <- as.data.frame(vn.mgraph$edges)
+
+# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
+#   geom_point(aes(size=-log10(padj), color=log2fc)) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic()
+# 
+# 
+# 
+# 
+# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
+#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
+#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
+#   theme_classic() + 
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   xlab("from node") + ylab("to node")
+
+e_df_lg <- e_df %>%
+  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
+e_df_lg$group <- as.factor(e_df_lg$group)
+e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
+e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
+e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
+
+e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
+
+# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
+#   geom_point(aes(color=-log10(padj))) + 
+#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+#   facet_wrap(~group, ncol = 3) + 
+#   theme_classic() + 
+#   theme(panel.grid.major.y = element_line(color = "gray",
+#                                           size = 0.5,
+#                                           linetype = 1)) + xlab("")
+
+
+comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
+comps <- gsub("G", "", comps)
+comps[1] <- "C01290"
+comps <- c(comps, "C01190")
+
+e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
+e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
+from_label <- c()
+for(i in e_df_lg$from){
+  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$from_label <- from_label
+to_label <- c()
+for(i in e_df_lg$to){
+  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
+}
+e_df_lg$to_label <- to_label
+
+# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
+  
+p4 <- ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
+  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
+  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
+  geom_point(aes(color=-log10(padj))) +
+  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
+  facet_wrap(~group, ncol = 3, scales="free_x") + 
+  theme_classic() +
+  ylab("") + xlab("") +
+  theme(panel.grid.major.y = element_line(color = "lightgray",
+                                          size = 0.5,
+                                          linetype = 1)) + xlab("")
+
+ggsave(
+  "NB_GN_FC_ras_prob_path.png",
+  plot = p4,
+  device = "png",
+  path = "./data/NB_GN_FC_images/",
+  scale = 1,
+  width = 2800,
+  height = 1500,
+  units = "px",
+  dpi = 300,
+  limitsize = FALSE,
+  bg = NULL,
+)
+```
+
+
+# Multipanel figure
+
+```{r}
+# library(multipanelfigure)
+# library(grid)
+# cols <- 3
+# rows <- 4
+# figure <- multi_panel_figure(
+#   width = 300,
+#   columns = cols,
+#   height = 450,
+#   rows = rows,
+#   )
+# 
+# # figure %<>% fill_panel(p1)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_FC_ras.png", scaling = "shrink", column = 1:2)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_graph_ras.png", scaling = "shrink")
+# 
+# # figure %<>% fill_panel(p2)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_FC_ras_prob.png", scaling = "shrink", column = 1:2)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_graph_ras_prob.png", scaling = "shrink")
+# 
+# # figure %<>% fill_panel(p3)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_FC_ras_prob_rec.png", scaling = "shrink", column = 1:2)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_graph_ras_prob_rec.png", scaling = "shrink")
+# 
+# # figure %<>% fill_panel(p4)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_FC_ras_prob_path.png", scaling = "shrink", column = 1:2)
+# figure %<>% fill_panel("./data/NB_GNB_FC_images/NB_GNB_graph_ras_prob_path.png", scaling = "shrink")
+# 
+# save_multi_panel_figure(figure, "./data/NB_GNB_FC_images/NB_GNB_FC_image.png", dpi = 600, limitsize=FALSE)
+```
+
+
