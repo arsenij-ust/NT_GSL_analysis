@@ -1,5 +1,5 @@
 ---
-title: "GN & Neuroblastoma - pathanalysis"
+title: "Ganglioneuroma & Neuroblastoma - pathanalysis"
 author:
 - name: Arsenij Ustjanzew (arsenij.ustjanzew@uni-mainz.de)<br><a href='https://www.unimedizin-mainz.de/imbei/'>IMBEI,
     University Medical Center Mainz</a><br>
@@ -40,10 +40,12 @@ library("magrittr")
 source("edge_probability_functions.R")
 ```
 
-# Data set analysis: GN vs. Neuroblastoma
+# Data set analysis: GN vs. NBL
 
 
 # Read data
+
+## Metabolic graph
 
 ```{r}
 # load graph
@@ -61,6 +63,10 @@ vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
 # edge_df <- igraph::as_data_frame(mgraph)
 ```
 
+## Gene expression data
+
+The raw fastq files of the GSE147635 dataset were downloaded from Gene Expression Omnibus.
+The resulting raw count files are processed in the following:  
 
 ```{r warning=FALSE, message=FALSE}
 counts_dir <- "./data/GSE147635-counts"
@@ -124,14 +130,14 @@ NB_GN_dds <- NB_GN_dds[-duplicated(rowData(NB_GN_dds)$geneSymbol),]
 rownames(NB_GN_dds) <- rowData(NB_GN_dds)$geneSymbol
 ```
 
-Filtering genes with less then 10 counts in sum for all samples
+## Filtering genes with less then 10 counts in sum for all samples
 
 ```{r}
 keep <- rowSums(counts(NB_GN_dds)) >= 10
 NB_GN_dds <- NB_GN_dds[keep,]
 ```
 
-# Normalization & log10 +1
+## Normalization & log10 +1
 
 ```{r}
 NB_GN_dds <- estimateSizeFactors(NB_GN_dds)
@@ -142,7 +148,7 @@ norm_counts <- log10(norm_counts + 1)
 # saveRDS(NB_GN_dds, "NB_GN_dds_GSE147635.Rds")
 ```
 
-# Distance matrix
+## Distance matrix
 
 ```{r, fig.height= 18, , fig.width = 18}
 vsd <- vst(NB_GN_dds, blind=FALSE)
@@ -192,7 +198,7 @@ ras_prob_up_path <- ras[r,] + (ras[r,] * transition_probability_paths[r,])
 ras_prob_up_rec <- ras[r,] + (ras[r,] * transition_probability_rec[r,])
 ```
 
-# PCA
+# PCA exploration
 
 ## RAS
 
@@ -321,7 +327,7 @@ ggbiplot(pca, choices = 1:2, obs.scale = 1, var.scale = 1, varname.size = 4,
 ## RAS 
 
 ```{r}
-umap_fit <- umap::umap(d  = t(ras), #sample norm_counts
+umap_fit <- umap::umap(d  = t(ras),
                            method = "naive",
                            n_neighbors = 3,
                            # n_components = input$n_components,
@@ -361,98 +367,6 @@ plotly::ggplotly(p)
 ```
 
 
-```{r}
-library("foreach")
-library("doParallel")
-
-#create the cluster
-my.cluster <- parallel::makeCluster(
-  30, 
-  type = "PSOCK"
-  )
-doParallel::registerDoParallel(cl = my.cluster)
-
-set.seed(1234)
-seeds <- sample.int(1000)
-# m1_ras <- matrix(ncol = 0, nrow = nrow(ras))
-# m1_ras <- foreach(s = seeds, .combine = "cbind", .packages="dbscan") %dopar% {
-#   umap_fit <-
-#     umap::umap(
-#       d  = scale(t(ras)),
-#       method = "naive",
-#       n_neighbors = 12,
-#       min_dist = 0.1,
-#       random_state = s,
-#       verbose = TRUE
-#     )
-#   cl <- hdbscan(umap_fit$layout, minPts = 10)
-#   return(cl$cluster)
-#   # print(cl$cluster)
-#   # m1 <- cbind(m1, cl$cluster)
-# }
-remove <- apply(ras_prob_path, 1, function(x){
-  all(x == 0)
-})
-
-v1_ras_prob <- list()
-v1_ras_prob <- foreach(s = seeds, .combine = "c", .packages="dbscan") %dopar% {
-  umap_fit <-
-    umap::umap(
-      d  = t(ras_prob_path)[,!remove],
-      method = "naive",
-      n_neighbors = 3,
-      min_dist = 0.1,
-      random_state = s,
-      verbose = TRUE
-    )
-  cl <- hdbscan(umap_fit$layout, minPts = 5)
-  return(list(list(seed=s, cluster=cl$cluster, umap_x=umap_fit$layout[,1], umap_y=umap_fit$layout[,2])))
-  # print(cl$cluster)
-  # m1 <- cbind(m1, cl$cluster)
-}
-#2.difgenes optimal: n_neighbors = 5; min_dist=0.1; minPts = 5
-
-all_x <- sapply(v1_ras_prob, function(x) print(x$umap_x))
-all_y <- sapply(v1_ras_prob, function(x) print(x$umap_y))
-all_cluster <- sapply(v1_ras_prob, function(x) print(x$cluster))
-
-all_xy <- cbind(all_x, all_y)
-
-# sampleDists <- dist(all_xy)
-
-library("RColorBrewer")
-# sampleDistMatrix <- as.matrix(sampleDists)
-# rownames(sampleDistMatrix) <- as.character(vsd$Diagnostic.Category)
-# colnames(sampleDistMatrix) <- NULL
-colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
-ann_df <- data.frame(
-  Group=colData(NB_GN_dds)$type
-  # ,
-  # cluster= as.factor(v1_ras_prob[[2]]$cluster)
-  )
-rownames(ann_df) <- rownames(all_xy)
-plotly::plot_ly(x=all_x[,14], y=all_y[,14], color=as.factor(all_cluster[,14]))
-plotly::plot_ly(x=all_x[,15], y=all_y[,15], color=colData(NB_GN_dds)$type)
-# pheatmap(sampleDistMatrix, show_rownames = FALSE, show_colnames = FALSE, annotation_row = ann_df, annotation_names_row=FALSE, annotation_colors = list(Group=c(GNB="#377EB8",NB="#E41A1C"),MYCN=c(Amplified="#FFFF00", `Not.Amplified`="#F6C077")))
-
-pheatmap(1-cor(t(all_xy)), show_rownames = FALSE, show_colnames = FALSE, annotation_row = ann_df, annotation_names_row=FALSE, annotation_colors = list(Group=c(GN="#377EB8",NB="#E41A1C")), clustering_method = "complete")
-# corrplot::corrplot(cor(t(all_xy)), order="hclust")
-
-# plotly::plot_ly(x=all_x[1,], y=all_y[1,])
-# energy::dcor(all_x[3,], all_y[3,])
-
-clustn <- apply(all_cluster, 2, function(x){
-  x <- x[x!=0]
-  # print(x)
-  length(unique(x))
-})
-table(as.factor(clustn))
-plot(as.factor(clustn))
-# m_sub <-m[,clustn==3]
-
-c <- cutree(hclust(as.dist(1-cor(t(all_xy)))),k=3)
-plotly::plot_ly(x=all_x[,17], y=all_y[,17], color=as.factor(c), mode="markers", symbol=as.factor(all_cluster[,1]))
-```
 
 ## RAS adjusted by trans. prob. per path
 
@@ -801,7 +715,7 @@ plotly::ggplotly(p)
 ```
 
 
-## Normalized counts of genes of the SL & GSL Metabolism
+# UMAP of normalized counts of genes of the SL & GSL Metabolism
 
 ```{r}
 gl_pw1 <- keggLink("hsa","hsa00600") # Sphingolipid metabolism
@@ -868,31 +782,87 @@ p <- as.data.frame(umap_fit$layout) %>%
 plotly::ggplotly(p)
 ```
 
+
+# Method for iterative stability assesment of the UMAPs 
+
 ```{r}
-# umap_fit <- umap::umap(d  = scale(t(ras_prob)), #sample norm_counts
-#                            method = "naive",
-#                            n_neighbors = 3,
-#                            # n_components = input$n_components,
-#                            # metric  = input$select_metric,
-#                            # n_epochs = input$n_epochs,
-#                            # init = input$select_init,
-#                            # min_dist= input$min_dist,
-#                            random_state = 123,
-#                            # transform_state = input$transform_state,
-#                            verbose = TRUE)
-# # plot(umap_fit$layout)
-# p <- as.data.frame(umap_fit$layout) %>%
-#   ggplot(aes(x = umap_fit$layout[,1],
-#              y = umap_fit$layout[,2],
-#              label = rownames(umap_fit$layout),
-#              color = colData(NB_GN_dds)$type))+
-#   geom_point()+
-#   theme_classic()+
-#   labs(x = "UMAP1",
-#        y = "UMAP2",
-#       subtitle = "UMAP plot") 
-# plotly::ggplotly(p)
+library("foreach")
+library("doParallel")
+
+#create the cluster
+my.cluster <- parallel::makeCluster(
+  30, 
+  type = "PSOCK"
+  )
+doParallel::registerDoParallel(cl = my.cluster)
+
+set.seed(1234)
+seeds <- sample.int(1000)
+
+remove <- apply(ras_prob_path, 1, function(x){
+  all(x == 0)
+})
+
+v1_ras_prob <- list()
+v1_ras_prob <- foreach(s = seeds, .combine = "c", .packages="dbscan") %dopar% {
+  umap_fit <-
+    umap::umap(
+      d  = t(ras_prob_path)[,!remove],
+      method = "naive",
+      n_neighbors = 3,
+      min_dist = 0.1,
+      random_state = s,
+      verbose = TRUE
+    )
+  cl <- hdbscan(umap_fit$layout, minPts = 5)
+  return(list(list(seed=s, cluster=cl$cluster, umap_x=umap_fit$layout[,1], umap_y=umap_fit$layout[,2])))
+  # print(cl$cluster)
+  # m1 <- cbind(m1, cl$cluster)
+}
+#2.difgenes optimal: n_neighbors = 5; min_dist=0.1; minPts = 5
+
+all_x <- sapply(v1_ras_prob, function(x) print(x$umap_x))
+all_y <- sapply(v1_ras_prob, function(x) print(x$umap_y))
+all_cluster <- sapply(v1_ras_prob, function(x) print(x$cluster))
+
+all_xy <- cbind(all_x, all_y)
+
+# sampleDists <- dist(all_xy)
+
+library("RColorBrewer")
+# sampleDistMatrix <- as.matrix(sampleDists)
+# rownames(sampleDistMatrix) <- as.character(vsd$Diagnostic.Category)
+# colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+ann_df <- data.frame(
+  Group=colData(NB_GN_dds)$type
+  # ,
+  # cluster= as.factor(v1_ras_prob[[2]]$cluster)
+  )
+rownames(ann_df) <- rownames(all_xy)
+plotly::plot_ly(x=all_x[,14], y=all_y[,14], color=as.factor(all_cluster[,14]))
+plotly::plot_ly(x=all_x[,15], y=all_y[,15], color=colData(NB_GN_dds)$type)
+# pheatmap(sampleDistMatrix, show_rownames = FALSE, show_colnames = FALSE, annotation_row = ann_df, annotation_names_row=FALSE, annotation_colors = list(Group=c(GNB="#377EB8",NB="#E41A1C"),MYCN=c(Amplified="#FFFF00", `Not.Amplified`="#F6C077")))
+
+pheatmap(1-cor(t(all_xy)), show_rownames = FALSE, show_colnames = FALSE, annotation_row = ann_df, annotation_names_row=FALSE, annotation_colors = list(Group=c(GN="#377EB8",NB="#E41A1C")), clustering_method = "complete")
+# corrplot::corrplot(cor(t(all_xy)), order="hclust")
+
+# plotly::plot_ly(x=all_x[1,], y=all_y[1,])
+# energy::dcor(all_x[3,], all_y[3,])
+
+clustn <- apply(all_cluster, 2, function(x){
+  x <- x[x!=0]
+  # print(x)
+  length(unique(x))
+})
+table(as.factor(clustn))
+plot(as.factor(clustn))
+# m_sub <-m[,clustn==3]
+
+c <- cutree(hclust(as.dist(1-cor(t(all_xy)))),k=3)
+plotly::plot_ly(x=all_x[,17], y=all_y[,17], color=as.factor(c), mode="markers", symbol=as.factor(all_cluster[,1]))
 ```
+
 
 # Hierarchical DBSCAN clustering
 
@@ -1308,20 +1278,18 @@ ggplot(score_group_lg[which(score_group_lg$reaction %in% r_interest),], aes(x=ty
 # MYCN vs. B3GALT4 correlation
 
 ```{r warning=FALSE, message=FALSE}
-brewer.pal(n=2,"Set1")
 
-plotly::plot_ly(x=norm_counts["MYCN",which(colData(NB_GN_dds)$type == "NB")], y = norm_counts["B3GALT4",which(colData(NB_GN_dds)$type == "NB")], type = "scatter", colors = pal) %>% 
-  plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
-         yaxis = list(title = 'log10( B3GALT4 expression )'))
-
+# B3GALT4 vs. MYCN
 plotly::plot_ly(x=norm_counts["MYCN",], y = norm_counts["B3GALT4",], type = "scatter", color = colData(NB_GN_dds)$type, colors = c("#377EB8","#E41A1C")) %>% 
   plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
          yaxis = list(title = 'log10( B3GALT4 expression )'),legend = list(x = 0.1, y = 0.1, bordercolor = "#000",bgcolor = "#fff", borderwidth="1"))
 
+# ST8SIA1 vs. MYCN
 plotly::plot_ly(x=norm_counts["MYCN",], y = norm_counts["ST8SIA1",], type = "scatter", color = colData(NB_GN_dds)$type, colors = c("#377EB8","#E41A1C")) %>% 
   plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
          yaxis = list(title = 'log10( ST8SIA1 expression )'),legend = list(x = 0.1, y = 0.9, bordercolor = "#000",bgcolor = "#fff", borderwidth="1"))
 
+# B4GALNT1 vs. MYCN
 plotly::plot_ly(x=norm_counts["MYCN",], y = norm_counts["B4GALNT1",], type = "scatter", color = colData(NB_GN_dds)$type, colors = c("#377EB8","#E41A1C")) %>% 
   plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
          yaxis = list(title = 'log10( B4GALNT1 expression )'),legend = list(x = 0.1, y = 0.9, bordercolor = "#000",bgcolor = "#fff", borderwidth="1"))
@@ -1330,9 +1298,9 @@ plotly::plot_ly(x=norm_counts["MYCN",], y = norm_counts["B4GALNT1",], type = "sc
 #   plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
 #          yaxis = list(title = 'log10( UGCG expression )'),legend = list(x = 0.1, y = 0.9, bordercolor = "#000",bgcolor = "#fff", borderwidth="1"))
 
-plotly::plot_ly(x=norm_counts["ALK",], y = norm_counts["B3GALT4",], type = "scatter", color = colData(NB_GN_dds)$type, colors = c("#377EB8","#E41A1C")) %>% 
-  plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
-         yaxis = list(title = 'log10( B3GALT4 expression )'),legend = list(x = 0.1, y = 0.1, bordercolor = "#000",bgcolor = "#fff", borderwidth="1"))
+# plotly::plot_ly(x=norm_counts["ALK",], y = norm_counts["B3GALT4",], type = "scatter", color = colData(NB_GN_dds)$type, colors = c("#377EB8","#E41A1C")) %>% 
+#   plotly::layout(xaxis = list(title = 'log10( MYCN expression )'), 
+#          yaxis = list(title = 'log10( B3GALT4 expression )'),legend = list(x = 0.1, y = 0.1, bordercolor = "#000",bgcolor = "#fff", borderwidth="1"))
 ```
 
 ```{r}
@@ -1340,13 +1308,7 @@ plotly::plot_ly(x=norm_counts["ALK",], y = norm_counts["B3GALT4",], type = "scat
 
 df <- data.frame(MYCN=norm_counts["MYCN",which(colData(NB_GN_dds)$type == "NB")],
                  B3GALT4=norm_counts["B3GALT4",which(colData(NB_GN_dds)$type == "NB")])
-# cor.all <- cor(df$MYCN, df$B3GALT4, method = 'pearson')
-# cor.amp <- cor(df$MYCN[df$MYCN.status=="Amplified"], df$B3GALT4[df$MYCN.status=="Amplified"], method = 'pearson')
-# cor.notamp <- cor(df$MYCN[df$MYCN.status=="Not Amplified"], df$B3GALT4[df$MYCN.status=="Not Amplified"], method = 'pearson')
-# 
-# cor.all <- cor(df$MYCN, df$B3GALT4, method = 'spearman')
-# cor.amp <- cor(df$MYCN[df$MYCN.status=="Amplified"], df$B3GALT4[df$MYCN.status=="Amplified"], method = 'spearman')
-# cor.notamp <- cor(df$MYCN[df$MYCN.status=="Not Amplified"], df$B3GALT4[df$MYCN.status=="Not Amplified"], method = 'spearman')
+
 
 df <- data.frame(MYCN=norm_counts["MYCN",],
                  B3GALT4=norm_counts["B3GALT4",],
@@ -1355,11 +1317,6 @@ df <- data.frame(MYCN=norm_counts["MYCN",],
 cor(df$MYCN, df$B3GALT4, method = 'pearson')
 cor(df$MYCN, df$ST8SIA1, method = 'pearson')
 cor(df$MYCN, df$B4GALNT1, method = 'pearson')
-```
-
-```{r}
-ggplot(df, aes(MYCN, B3GALT4)) + geom_point() + geom_smooth(alpha=0.3, method="lm")
-
 ```
 
 # GD2 centric Input vs. Output reactions
@@ -1492,728 +1449,9 @@ plotly::plot_ly(x=as.factor(cl$cluster), y = scale(input - output), color=colDat
 
 # p-value & log2FC computation GN vs. Neuroblastoma
 
-## RAS
+See seperate file NB_GN_FC_image.Rmd
 
-```{r warning=FALSE, message=FALSE}
-p.vals <- sapply(1:nrow(ras), function(x){
-  ks.test(ras[x, which(colData(NB_GN_dds)$type=="NB")],ras[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
-})
-pval_df <- data.frame(reaction=rownames(ras), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
-log2fc <- sapply(1:nrow(ras), function(x){
-  log2(mean(ras[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras[x, which(colData(NB_GN_dds)$type=="GN")]))
-})
-pval_df$log2fc <- log2fc
-rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
-
-pval_df$NB <- rowMeans(ras[, which(colData(NB_GN_dds)$type=="NB")])
-pval_df$GN <- rowMeans(ras[, which(colData(NB_GN_dds)$type=="GN")])
-
-# lower_ci_NB <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_NB <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
-# })
-# lower_ci_GN <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_GN <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
-# })
-
-pval_df$sd_NB <- sapply(1:nrow(ras), function(x){
-  sd(ras[x, which(colData(NB_GN_dds)$type=="NB")])
-})
-pval_df$sd_GN <- sapply(1:nrow(ras), function(x){
-  sd(ras[x, which(colData(NB_GN_dds)$type=="GN")])
-})
-
-```
-
-```{r, fig.width = 10, fig.height=10}
-vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
-vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
-
-
-vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
-vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
-
-vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
-vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
-vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
-vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
-# vn.mgraph$edges$label <- vn.mgraph$edges$miriam.kegg.reaction
-# vn.mgraph$edges$label <- paste0("RAS: ", round(vn.mgraph$edges$log2fc,3))
-# vn.mgraph$edges$font.color <- "black"
-
-# compounds of gangliosphingolipid
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-
-vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
-
-vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
-vn.mgraph$nodes$level <- c(
-  "Lactosylceramide" = 1,
-  "GM1" = 3,
-  "GM2" = 2,
-  "GD3" = 1,
-  "GT2" = 2,
-  "GT3" = 1,
-  "GD1b" = 3,
-  "GT1b" = 4,
-  "GD1a" = 4,
-  "GM1b" = 4,
-  "GM3" = 1,
-  "GD2" = 2,
-  "GA2" = 2,
-  "GA1" = 3,
-  "GT1c" = 3,
-  "GQ1b" = 5,
-  "GQ1balpha" = 5,
-  "GT1aalpha" = 5,
-  "GT1a" = 5,
-  "GD1c" = 5,
-  "GD1a1" = 4)
-# 
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
-  visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
-  visNodes(shape = 'box') %>% 
-  visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1) %>%
-  visPhysics(enabled = FALSE)
-
-
-# const options = {
-#   "nodes": {
-#     "borderWidthSelected": null,
-#     "opacity": null,
-#     "fixed": {
-#       "x": true,
-#       "y": true
-#     },
-#     "shape": "box",
-#     "shapeProperties": {
-#       "borderRadius": 5
-#     },
-#     "size": 11
-#   },
-#   "edges": {
-#     "arrows": {
-#       "to": {
-#         "enabled": true
-#       }
-#     },
-#     "arrowStrikethrough": false,
-#     "font": {
-#       "color": "rgba(2,9,52,1)",
-#       "size": 600,
-#       "align": "bottom"
-#     },
-#     "labelHighlightBold": false,
-#     "scaling": {
-#       "label": {
-#         "min": null,
-#         "max": null,
-#         "maxVisible": null,
-#         "drawThreshold": null
-#       }
-#     },
-#     "selfReferenceSize": null,
-#     "selfReference": {
-#       "angle": 0.7853981633974483
-#     },
-#     "smooth": false
-#   },
-#   "layout": {
-#     "hierarchical": {
-#       "enabled": true
-#     }
-#   },
-#   "interaction": {
-#     "selectable": false,
-#     "selectConnectedEdges": false,
-#     "hoverConnectedEdges": false
-#   },
-#   "physics": {
-#     "enabled": false,
-#     "minVelocity": 0.75
-#   }
-# }
-
-# custom_network <- visNetworkEditor(object = visNetwork(vn.mgraph$nodes, vn.mgraph$edges))
-# custom_network
-```
-
-```{r}
-e_df <- as.data.frame(vn.mgraph$edges)
-
-# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
-#   geom_point(aes(size=-log10(padj), color=log2fc)) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic()
-# 
-# 
-# 
-# 
-# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
-#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic() + 
-#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-#   xlab("from node") + ylab("to node")
-
-e_df_lg <- e_df %>%
-  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
-e_df_lg$group <- as.factor(e_df_lg$group)
-e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
-e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
-
-e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
-
-# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
-#   geom_point(aes(color=-log10(padj))) + http://134.93.127.27:8787/graphics/plot_zoom_png?width=803&height=898
-#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-#   facet_wrap(~group, ncol = 3) + 
-#   theme_classic() + 
-#   theme(panel.grid.major.y = element_line(color = "gray",
-#                                           size = 0.5,
-#                                           linetype = 1)) + xlab("")
-
-
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-comps <- c(comps, "C01190")
-
-e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
-e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
-from_label <- c()
-for(i in e_df_lg$from){
-  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$from_label <- from_label
-to_label <- c()
-for(i in e_df_lg$to){
-  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$to_label <- to_label
-
-# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
-  
-ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
-  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
-  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
-  geom_point(aes(color=-log10(padj))) +
-  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-  facet_wrap(~group, ncol = 3, scales="free_x") + 
-  theme_classic() +
-  ylab("") + xlab("") +
-  theme(panel.grid.major.y = element_line(color = "lightgray",
-                                          size = 0.5,
-                                          linetype = 1)) + xlab("")
-```
-
-
-## RAS adjusted by transition prob.
-
-```{r warning=FALSE, message=FALSE}
-p.vals <- sapply(1:nrow(ras_prob), function(x){
-  # print(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")])
-  ks.test(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")],ras_prob[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
-})
-pval_df <- data.frame(reaction=rownames(ras_prob), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
-log2fc <- sapply(1:nrow(ras_prob), function(x){
-  log2(mean(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")]))
-})
-pval_df$log2fc <- log2fc
-rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
-
-pval_df$NB <- rowMeans(ras_prob[, which(colData(NB_GN_dds)$type=="NB")])
-pval_df$GN <- rowMeans(ras_prob[, which(colData(NB_GN_dds)$type=="GN")])
-
-# lower_ci_NB <- sapply(1:nrow(ras_prob), function(x){
-#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_NB <- sapply(1:nrow(ras_prob), function(x){
-#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
-# })
-# lower_ci_GN <- sapply(1:nrow(ras_prob), function(x){
-#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_GN <- sapply(1:nrow(ras_prob), function(x){
-#   t.test(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
-# })
-
-pval_df$sd_NB <- sapply(1:nrow(ras_prob), function(x){
-  sd(ras_prob[x, which(colData(NB_GN_dds)$type=="NB")])
-})
-pval_df$sd_GN <- sapply(1:nrow(ras_prob), function(x){
-  sd(ras_prob[x, which(colData(NB_GN_dds)$type=="GN")])
-})
-```
-
-```{r fig.width = 10, fig.height=10}
-vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
-vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
-
-
-vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
-vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
-
-vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
-vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
-vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
-vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
-
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
-
-# compounds of gangliosphingolipid
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-
-vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
-
-vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
-vn.mgraph$nodes$level <- c(
-  "Lactosylceramide" = 1,
-  "GM1" = 3,
-  "GM2" = 2,
-  "GD3" = 1,
-  "GT2" = 2,
-  "GT3" = 1,
-  "GD1b" = 3,
-  "GT1b" = 4,
-  "GD1a" = 4,
-  "GM1b" = 4,
-  "GM3" = 1,
-  "GD2" = 2,
-  "GA2" = 2,
-  "GA1" = 3,
-  "GT1c" = 3,
-  "GQ1b" = 5,
-  "GQ1balpha" = 5,
-  "GT1aalpha" = 5,
-  "GT1a" = 5,
-  "GD1c" = 5,
-  "GD1a1" = 4)
-# 
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
-  visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
-  visNodes(shape = 'box') %>% 
-  visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1)%>%
-  visPhysics(enabled = FALSE)
-
-```
-
-```{r}
-e_df <- as.data.frame(vn.mgraph$edges)
-
-# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
-#   geom_point(aes(size=-log10(padj), color=log2fc)) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic()
-# 
-# 
-# 
-# 
-# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
-#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic() + 
-#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-#   xlab("from node") + ylab("to node")
-
-e_df_lg <- e_df %>%
-  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
-e_df_lg$group <- as.factor(e_df_lg$group)
-e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
-e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
-
-e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
-
-# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
-#   geom_point(aes(color=-log10(padj))) + 
-#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-#   facet_wrap(~group, ncol = 3) + 
-#   theme_classic() + 
-#   theme(panel.grid.major.y = element_line(color = "gray",
-#                                           size = 0.5,
-#                                           linetype = 1)) + xlab("")
-
-
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-comps <- c(comps, "C01190")
-
-e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
-e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
-from_label <- c()
-for(i in e_df_lg$from){
-  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$from_label <- from_label
-to_label <- c()
-for(i in e_df_lg$to){
-  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$to_label <- to_label
-
-# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
-  
-ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
-  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
-  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
-  geom_point(aes(color=-log10(padj))) +
-  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-  facet_wrap(~group, ncol = 3, scales="free_x") + 
-  theme_classic() +
-  ylab("") + xlab("") +
-  theme(panel.grid.major.y = element_line(color = "lightgray",
-                                          size = 0.5,
-                                          linetype = 1)) + xlab("")
-```
-
-## RAS adjusted by recursive transition prob.
-
-```{r warning=FALSE, message=FALSE}
-p.vals <- sapply(1:nrow(ras_prob_rec), function(x){
-  # print(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")])
-  ks.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")],ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
-})
-pval_df <- data.frame(reaction=rownames(ras_prob_rec), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
-log2fc <- sapply(1:nrow(ras_prob_rec), function(x){
-  log2(mean(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")]))
-})
-pval_df$log2fc <- log2fc
-rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
-
-pval_df$NB <- rowMeans(ras_prob_rec[, which(colData(NB_GN_dds)$type=="NB")])
-pval_df$GN <- rowMeans(ras_prob_rec[, which(colData(NB_GN_dds)$type=="GN")])
-# lower_ci_NB <- sapply(1:nrow(ras_prob_rec), function(x){
-#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_NB <- sapply(1:nrow(ras_prob_rec), function(x){
-#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
-# })
-# lower_ci_GN <- sapply(1:nrow(ras_prob_rec), function(x){
-#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_GN <- sapply(1:nrow(ras_prob_rec), function(x){
-#   t.test(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
-# })
-
-pval_df$sd_NB <- sapply(1:nrow(ras_prob_rec), function(x){
-  sd(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="NB")])
-})
-pval_df$sd_GN <- sapply(1:nrow(ras_prob_rec), function(x){
-  sd(ras_prob_rec[x, which(colData(NB_GN_dds)$type=="GN")])
-})
-```
-
-```{r fig.width = 10, fig.height=10}
-vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
-vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
-
-
-vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
-vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
-
-vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
-vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
-vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
-vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
-
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
-
-# compounds of gangliosphingolipid
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-
-vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
-
-vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
-vn.mgraph$nodes$level <- c(
-  "Lactosylceramide" = 1,
-  "GM1" = 3,
-  "GM2" = 2,
-  "GD3" = 1,
-  "GT2" = 2,
-  "GT3" = 1,
-  "GD1b" = 3,
-  "GT1b" = 4,
-  "GD1a" = 4,
-  "GM1b" = 4,
-  "GM3" = 1,
-  "GD2" = 2,
-  "GA2" = 2,
-  "GA1" = 3,
-  "GT1c" = 3,
-  "GQ1b" = 5,
-  "GQ1balpha" = 5,
-  "GT1aalpha" = 5,
-  "GT1a" = 5,
-  "GD1c" = 5,
-  "GD1a1" = 4)
-# 
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
-  visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
-  visNodes(shape = 'box') %>% 
-  visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1)%>%
-  visPhysics(enabled = FALSE)
-```
-
-```{r}
-e_df <- as.data.frame(vn.mgraph$edges)
-
-# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
-#   geom_point(aes(size=-log10(padj), color=log2fc)) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic()
-# 
-# 
-# 
-# 
-# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
-#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic() + 
-#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-#   xlab("from node") + ylab("to node")
-
-e_df_lg <- e_df %>%
-  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
-e_df_lg$group <- as.factor(e_df_lg$group)
-e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
-e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
-
-e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
-
-# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
-#   geom_point(aes(color=-log10(padj))) + 
-#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-#   facet_wrap(~group, ncol = 3) + 
-#   theme_classic() + 
-#   theme(panel.grid.major.y = element_line(color = "gray",
-#                                           size = 0.5,
-#                                           linetype = 1)) + xlab("")
-
-
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-comps <- c(comps, "C01190")
-
-e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
-e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
-from_label <- c()
-for(i in e_df_lg$from){
-  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$from_label <- from_label
-to_label <- c()
-for(i in e_df_lg$to){
-  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$to_label <- to_label
-
-# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
-  
-ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
-  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
-  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
-  geom_point(aes(color=-log10(padj))) +
-  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-  facet_wrap(~group, ncol = 3, scales="free_x") + 
-  theme_classic() +
-  ylab("") + xlab("") +
-  theme(panel.grid.major.y = element_line(color = "lightgray",
-                                          size = 0.5,
-                                          linetype = 1)) + xlab("")
-```
-
-## RAS adjusted by transition prob. of path
-
-```{r warning=FALSE, message=FALSE}
-
-# ras_prob_path2 <- ras_prob_path[!apply(ras_prob_path, 1, function(x) all(x==0)), ]
-ras_prob_path2 <- as.matrix(ras_prob_path)
-
-p.vals <- sapply(1:nrow(ras_prob_path2), function(x){
-  # print(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")])
-  ks.test(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")],ras_prob_path2[x, which(colData(NB_GN_dds)$type=="GN")])$p.value
-})
-pval_df <- data.frame(reaction=rownames(ras_prob_path2), pval=round(p.vals, 5), padj=p.adjust(p.vals, method="BH"))
-log2fc <- sapply(1:nrow(ras_prob_path2), function(x){
-  log2(mean(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")])) - log2(mean(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="GN")]))
-})
-pval_df$log2fc <- log2fc
-rownames(pval_df) <- gsub("| .*", "", pval_df$reaction)
-
-pval_df[which(is.nan(pval_df$log2fc)),"log2fc"] <- 0
-
-pval_df$NB <- rowMeans(ras_prob_path2[, which(colData(NB_GN_dds)$type=="NB")])
-pval_df$GN <- rowMeans(ras_prob_path2[, which(colData(NB_GN_dds)$type=="GN")])
-
-# lower_ci_NB <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_NB <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="NB")], conf.level = 0.95)$conf.int[2]
-# })
-# lower_ci_GN <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[1]
-# })
-# upper_ci_GN <- sapply(1:nrow(ras), function(x){
-#   t.test(ras[x, which(colData(NB_GN_dds)$type=="GN")], conf.level = 0.95)$conf.int[2]
-# })
-
-pval_df$sd_NB <- sapply(1:nrow(ras_prob_path2), function(x){
-  sd(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="NB")])
-})
-pval_df$sd_GN <- sapply(1:nrow(ras_prob_path2), function(x){
-  sd(ras_prob_path2[x, which(colData(NB_GN_dds)$type=="GN")])
-})
-```
-
-```{r fig.width = 10, fig.height=10}
-vn.mgraph <- visNetwork::toVisNetworkData(mgraph, idToLabel = FALSE)
-vn.mgraph$edges$id <- 1:nrow(vn.mgraph$edges)
-
-
-vn.mgraph$edges$miriam.kegg.reaction <- unlist(vn.mgraph$edges$miriam.kegg.reaction)
-vn.mgraph$edges <- merge(as.data.frame(vn.mgraph$edges), pval_df, by.x = which(colnames(vn.mgraph$edges) =="miriam.kegg.reaction"), by.y = 0, all.x = TRUE)
-
-vn.mgraph$edges$color <- ifelse(vn.mgraph$edges$log2fc < 0, "blue", "red")
-vn.mgraph$edges[which(vn.mgraph$edges$padj > 0.05),"color"] <- "grey"
-vn.mgraph$edges$value <- abs(vn.mgraph$edges$log2fc)
-vn.mgraph$edges$title <- round(vn.mgraph$edges$log2fc,3)
-
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%  visEdges(arrows = 'to', smooth =T)
-
-# compounds of gangliosphingolipid
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-
-vn.mgraph$nodes[which(vn.mgraph$nodes$miriam.kegg.compound == "00127"),"label"] <- "GD1alpha"
-
-vn.mgraph$nodes <- vn.mgraph$nodes[which(vn.mgraph$nodes$id %in% comps),]
-vn.mgraph$nodes$level <- c(
-  "Lactosylceramide" = 1,
-  "GM1" = 3,
-  "GM2" = 2,
-  "GD3" = 1,
-  "GT2" = 2,
-  "GT3" = 1,
-  "GD1b" = 3,
-  "GT1b" = 4,
-  "GD1a" = 4,
-  "GM1b" = 4,
-  "GM3" = 1,
-  "GD2" = 2,
-  "GA2" = 2,
-  "GA1" = 3,
-  "GT1c" = 3,
-  "GQ1b" = 5,
-  "GQ1balpha" = 5,
-  "GT1aalpha" = 5,
-  "GT1a" = 5,
-  "GD1c" = 5,
-  "GD1a1" = 4)
-# 
-visNetwork(vn.mgraph$nodes, vn.mgraph$edges) %>%
-  visEdges(arrows = 'to', smooth =FALSE, arrowStrikethrough = FALSE, font = list(size=14, align="bottom")) %>%  
-  visNodes(shape = 'box') %>% 
-  visHierarchicalLayout(levelSeparation = NULL, nodeSpacing = 1, edgeMinimization=TRUE,treeSpacing=1)%>%
-  visPhysics(enabled = FALSE)
-```
-
-```{r}
-e_df <- as.data.frame(vn.mgraph$edges)
-
-# ggplot(e_df, aes(x=1, y=miriam.kegg.reaction)) +
-#   geom_point(aes(size=-log10(padj), color=log2fc)) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic()
-# 
-# 
-# 
-# 
-# ggplot(e_df, aes(x=as.character(to), y=as.character(from), fill=log2fc)) +
-#   geom_point(aes(size=-log10(padj), shape = 21, colour = "black")) +
-#   colorspace::scale_color_continuous_diverging(palette = "Blue-Red 3") +
-#   theme_classic() + 
-#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-#   xlab("from node") + ylab("to node")
-
-e_df_lg <- e_df %>%
-  tidyr::pivot_longer(colnames(dplyr::select(e_df, c("NB", "GN", "log2fc"))), names_to = "group", values_to = "mean")
-e_df_lg$group <- as.factor(e_df_lg$group)
-e_df_lg[which(e_df_lg$group %in% c("NB", "GN")),"padj"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group %in% c("log2fc")),"sd_GN"] <- NA
-e_df_lg[which(e_df_lg$group == "GN"),"sd_NB"] <- NA
-e_df_lg[which(e_df_lg$group == "NB"),"sd_GN"] <- NA
-
-e_df_lg <- e_df_lg %>% mutate(sd = coalesce(sd_NB,sd_GN)) 
-
-# ggplot(e_df_lg, aes(x=mean, y=miriam.kegg.reaction, group=group)) + 
-#   geom_point(aes(color=-log10(padj))) + 
-#   colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-#   facet_wrap(~group, ncol = 3) + 
-#   theme_classic() + 
-#   theme(panel.grid.major.y = element_line(color = "gray",
-#                                           size = 0.5,
-#                                           linetype = 1)) + xlab("")
-
-
-comps <- names(keggGet("hsa00604")[[1]]$COMPOUND)
-comps <- gsub("G", "", comps)
-comps[1] <- "C01290"
-comps <- c(comps, "C01190")
-
-e_df_lg <- e_df_lg[which(e_df_lg$from %in% comps | e_df_lg$to %in% comps),]
-e_df_lg$geneSymbol <- sapply(e_df_lg$symbol, function(x) paste0(unique(x), collapse = ' '))
-from_label <- c()
-for(i in e_df_lg$from){
-  from_label <- c(from_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$from_label <- from_label
-to_label <- c()
-for(i in e_df_lg$to){
-  to_label <- c(to_label, vn.mgraph$nodes[which(vn.mgraph$nodes$id == i), "label"])
-}
-e_df_lg$to_label <- to_label
-
-# ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (", geneSymbol, ")"), group=group)) + 
-  
-ggplot(e_df_lg, aes(x=mean, y=paste0(miriam.kegg.reaction, " (from: ", from_label, " - to: ",to_label, ")"), group=group)) + 
-  geom_vline(xintercept = 0, colour="lightgray", linetype="solid") +
-  geom_errorbar(aes(xmin=mean - sd,xmax=mean + sd,width=0.2)) +
-  geom_point(aes(color=-log10(padj))) +
-  colorspace::scale_color_continuous_sequential(palette = "Reds 3") +
-  facet_wrap(~group, ncol = 3, scales="free_x") + 
-  theme_classic() +
-  ylab("") + xlab("") +
-  theme(panel.grid.major.y = element_line(color = "lightgray",
-                                          size = 0.5,
-                                          linetype = 1)) + xlab("")
-```
-
-# summary of the pathway activity
+# Summary of the pathway activity
 
 ```{r}
 r_604 <- keggLink("reaction","map00604") # ganglio series
@@ -2288,7 +1526,6 @@ ggplot(pa_df, aes(x=pathway, y=mean, fill=type)) +
   scale_fill_brewer(palette="Paired") + 
   theme_minimal()
 ```
-
 
 
 # Heatmaps of reactions of interest
@@ -2396,332 +1633,6 @@ anno <- as.data.frame(colData(NB_GN_dds)$type)
 rownames(anno) <- colnames(ras)
 pheatmap::pheatmap(t(series_df), cluster_cols = T,color = rev(mapal), scale = "row", annotation_col = anno, show_colnames = F)
 ```
-
-# Differential Gene Expression Analysis
-
-```{r warning=FALSE, message=FALSE}
-FDR <- 0.05
-
-# NB_GN_dds <- DESeq2::DESeq(NB_GN_dds, parallel = TRUE)
-# 
-# resultsNames(NB_GN_dds)
-# 
-# summary(results(NB_GN_dds))
-# 
-# NB_GN_dds <- lfcShrink(NB_GN_dds, coef="type_NB_vs_GN", type="apeglm")
-# NB_GN_dds
-
-
-NB_GN_dds <- DESeq2::DESeq(NB_GN_dds)
-res <- results(NB_GN_dds, alpha=FDR)
-resultsNames(NB_GN_dds)
-summary(res)
-res <- lfcShrink(NB_GN_dds, coef="type_NB_vs_GN", type="apeglm", res=res)
-```
-
-```{r}
-# NB_GN_dds_res <- results(NB_GN_dds, alpha=FDR)
-# 
-# summary(NB_GN_dds_res)
-
-NB_GN_dds_res_df <- as.data.frame(res)
-
-NB_GN_dds_res_df <- round(NB_GN_dds_res_df, 5)
-
-DT::datatable(NB_GN_dds_res_df, caption="NB v.s. GN, DE genes (rounded values)")
-```
-
-```{r fig.width = 10, fig.height = 10}
-target_genes <- keggLink("hsa","hsa00604")
-ids_target_genes <- gsub("hsa:", "", target_genes)
-target_genes_symbolIDs <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = ids_target_genes, keytype = "ENTREZID", column="SYMBOL")
-
-# # EnhancedVolcano(res,
-# #     lab = rownames(res),
-# #     x = 'log2FoldChange',
-# #     y = 'pvalue')
-# 
-# keyvals.colour <- ifelse(
-#     res$log2FoldChange < -2.5, 'royalblue',
-#       ifelse(res$log2FoldChange > 2.5, 'gold',
-#         'black'))
-#   keyvals.colour[is.na(keyvals.colour)] <- 'black'
-#   names(keyvals.colour)[keyvals.colour == 'gold'] <- 'high'
-#   names(keyvals.colour)[keyvals.colour == 'black'] <- 'mid'
-#   names(keyvals.colour)[keyvals.colour == 'royalblue'] <- 'low'
-
-keyvals <- ifelse(
-  rownames(res) %in% target_genes_symbolIDs, "red", "black")
-names(keyvals) <- rownames(res)
-# keyvals[is.na(keyvals)] <- 'black'
-# names(keyvals)[keyvals == 'gold'] <- 'high'
-# names(keyvals)[keyvals == 'black'] <- 'mid'
-# names(keyvals)[keyvals == 'royalblue'] <- 'low'
-
-EnhancedVolcano(res,
-    lab = rownames(res),
-    x = 'log2FoldChange',
-    y = 'padj',
-    selectLab = target_genes_symbolIDs,
-    # selectLab = rownames(res)[which(names(keyvals) %in% c('high', 'low'))],
-    # selectLab = c("ST8SIA1", "B4GALNT1"),
-    xlab = bquote(~Log[2]~ 'fold change'),
-    pCutoff = 1e-05,
-    FCcutoff = 1.0,
-    pointSize = 2.0,
-    labSize = 3.0,
-    labCol = 'black',
-    labFace = 'plain',
-    boxedLabels = FALSE,
-    colAlpha = 4/5,
-    # colCustom = keyvals,
-    legendPosition = 'right',
-    legendLabSize = 14,
-    legendIconSize = 4.0,
-    drawConnectors = TRUE,
-    widthConnectors = 0.5,
-    colConnectors = 'black',
-    max.overlaps = 50)
-
-# EnhancedVolcano(res,
-#     lab = rownames(res),
-#     x = 'log2FoldChange',
-#     y = 'pvalue',
-#     selectLab = target_genes_symbolIDs,
-#     xlim = c(-6.5,6.5),
-#     xlab = bquote(~Log[2]~ 'fold change'),
-#     ylab = bquote(~-Log[10] ~ italic(Q)),
-#     title = 'NB v.s. GN',
-#     pCutoff = 0.05,
-#     FCcutoff = 0.6,
-#     # colCustom = keyvals,
-#     colAlpha = 4/5,
-#     # legend=c('NS','Log (base 2) fold-change','P value',
-#              # 'P value & Log (base 2) fold-change'),
-#     legendPosition = 'right',
-#     legendLabSize = 20,
-#     legendIconSize = 10,
-#     drawConnectors = TRUE,
-#     widthConnectors = 1.2,
-#     colConnectors = 'black',
-#     boxedLabels=TRUE,
-#     labSize =10)
-
-```
-
-## Annotation via fgse
-
-fgse is an R package for fast preranked gene set enrichment analysis (GSEA)
-
-```{r readpathways}
-# Load the pathways into a named list
-library("fgsea")
-pathways.hallmark <- gmtPathways("./data/msigdb_v2023.1.Hs_GMTs/h.all.v2023.1.Hs.symbols.gmt")
-pathways.go.bp <- gmtPathways("./data/msigdb_v2023.1.Hs_GMTs/c5.go.bp.v2023.1.Hs.symbols.gmt")
-pathways.go.mf <- gmtPathways("./data/msigdb_v2023.1.Hs_GMTs/c5.go.mf.v2023.1.Hs.symbols.gmt")
-# pathways.reactome <- gmtPathways("m2.cp.reactome.v2023.1.Mm.symbols.gmt")
-```
-
-
-```{r fgsea}
-
-# get ranks of stat
-res$SYMBOL <- rownames(res)
-res2 <- res %>% 
-  as.data.frame() %>%
-  dplyr::select(SYMBOL, log2FoldChange) %>% 
-  na.omit() %>% 
-  dplyr::distinct()
-
-ranks <- tibble::deframe(res2)
-
-fgseaRes_hallmark <-
-  fgsea(pathways = pathways.hallmark,
-              # nperm    = 1000,
-              stats    = ranks,
-              eps      = 0.0,
-              minSize  = 5,
-              maxSize  = 500)
-fgseaRes_go_bp <-
-  fgsea(pathways = pathways.go,
-              # nperm    = 1000,
-              stats    = ranks,
-              eps      = 0.0,
-              minSize  = 5,
-              maxSize  = 500)
-fgseaRes_go_mf <-
-  fgsea(pathways = pathways.go,
-              # nperm    = 1000,
-              stats    = ranks,
-              eps      = 0.0,
-              minSize  = 5,
-              maxSize  = 500)
-# myresults_all[[i]][["fgseaRes_reactome"]] <-
-#   fgsea(pathways = pathways.reactome,
-#               # nperm    = 1000,
-#               stats    = ranks,
-#               eps      = 0.0,
-#               minSize  = 5,
-#               maxSize  = 500)
-
-```
-
-Hallmark genesets:
-
-```{r}
-fgseaRes_hallmark %>% 
-  arrange(padj) %>% 
-  DT::datatable()
-```
-
-```{r}
-topPathwaysUp <- fgseaRes_hallmark[ES > 0][head(order(pval), n=10), pathway]
-topPathwaysDown <- fgseaRes_hallmark[ES < 0][head(order(pval), n=10), pathway]
-topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
-plotGseaTable(pathways.hallmark[topPathways], ranks, fgseaRes_hallmark, 
-              gseaParam=0.5)
-```
-
-GO biological process genesets:
-
-```{r}
-fgseaRes_go_bp %>% 
-  dplyr::filter(., pval <= 0.1) %>%
-  arrange(padj) %>% 
-  DT::datatable()
-```
-
-```{r}
-topPathwaysUp <- fgseaRes_go_bp[ES > 0][head(order(pval), n=10), pathway]
-topPathwaysDown <- fgseaRes_go_bp[ES < 0][head(order(pval), n=10), pathway]
-topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
-plotGseaTable(pathways.go[topPathways], ranks, fgseaRes_go_bp, 
-              gseaParam=0.5)
-```
-
-GO molecular function genesets:
-
-```{r}
-fgseaRes_go_mf %>% 
-  dplyr::filter(., pval <= 0.1) %>%
-  arrange(padj) %>% 
-  DT::datatable()
-```
-
-```{r}
-topPathwaysUp <- fgseaRes_go_mf[ES > 0][head(order(pval), n=10), pathway]
-topPathwaysDown <- fgseaRes_go_mf[ES < 0][head(order(pval), n=10), pathway]
-topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
-plotGseaTable(pathways.go[topPathways], ranks, fgseaRes_go_mf, 
-              gseaParam=0.5)
-```
-
-Reactome genesets:
-
-```{r}
-# myresults_all$group_Susceptible_vs_No_stress$fgseaRes_reactome %>% 
-#   arrange(padj) %>% 
-#   DT::datatable()
-```
-
-```{r}
-# topPathwaysUp <- myresults_all$group_Susceptible_vs_No_stress$fgseaRes_reactome[ES > 0][head(order(pval), n=10), pathway]
-# topPathwaysDown <- myresults_all$group_Susceptible_vs_No_stress$fgseaRes_reactome[ES < 0][head(order(pval), n=10), pathway]
-# topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
-# plotGseaTable(pathways.reactome[topPathways], ranks, myresults_all$group_Susceptible_vs_No_stress$fgseaRes_reactome, 
-#               gseaParam=0.5)
-```
-
-
-# KEGG pathway enrichment
-
-```{r}
-# library(pathfindR)
-# input_df <- data.frame(Gene.symbol=rownames(res), logFC=res$log2FoldChange, adj.P.Val=res$padj)
-# input_df <- input_df[which(!is.na(input_df$adj.P.Val)),]
-# output_df <- run_pathfindR(input_df)
-
-# library("clusterProfiler")
-# search_kegg_organism('hsa', by='kegg_code')
-# 
-# sigGenes <- shrinkLvV$Entrez[ shrinkLvV$FDR < 0.01 & 
-#                               !is.na(shrinkLvV$FDR) &
-#                               abs(shrinkLvV$logFC) > 1 ]
-# sigGenes <- na.exclude(sigGenes)
-# kk <- enrichKEGG(gene = sigGenes, organism = 'mmu')
-# head(kk, n=10)
-# 
-# kk <- enrichKEGG(gene         = gene,
-#                  organism     = 'hsa',
-#                  pvalueCutoff = 0.05)
-# 
-# kk2 <- gseKEGG(geneList     = geneList,
-#                organism     = 'hsa',
-#                minGSSize    = 120,
-#                pvalueCutoff = 0.05,
-#                verbose      = FALSE)
-
-
-#####################################################
-# Pull all pathways for AT  
-# pathways.list <- keggList("pathway", "hsa")
-# head(pathways.list)
-# 
-# # Pull all genes for each pathway
-# pathway.codes <- sub("path:", "", names(pathways.list)) 
-# genes.by.pathway <- sapply(pathway.codes,
-#     function(pwid){
-#         pw <- keggGet(pwid)
-#         if (is.null(pw[[1]]$GENE)) return(NA)
-#         pw2 <- pw[[1]]$GENE[c(FALSE,TRUE)] # may need to modify this to c(FALSE, TRUE) for other organisms
-#         pw2 <- unlist(lapply(strsplit(pw2, split = ";", fixed = T), function(x)x[1]))
-#         return(pw2)
-#     }
-# )
-# head(genes.by.pathway)
-# 
-# # infile <- "I5_v_C_time6.txt"
-# # DE.table <- read.delim(infile, stringsAsFactors = F)
-# # 
-# # # OR
-# # 
-# # DE.table <- read.delim("https://raw.githubusercontent.com/ucdavis-bioinformatics-training/2018-June-RNA-Seq-Workshop/master/friday/I5_v_C_time6.txt")
-# 
-# # geneList <- DE.table$P.Value 
-# geneList <- res$pvalue
-# # names(geneList) <- DE.table$Gene
-# names(geneList) <- rownames(res)
-# head(geneList)
-# 
-# 
-# # Wilcoxon test for each pathway
-# pVals.by.pathway <- t(sapply(names(genes.by.pathway),
-#     function(pathway) {
-#         pathway.genes <- genes.by.pathway[[pathway]]
-#         list.genes.in.pathway <- intersect(names(geneList), pathway.genes)
-#         list.genes.not.in.pathway <- setdiff(names(geneList), list.genes.in.pathway)
-#         scores.in.pathway <- geneList[list.genes.in.pathway]
-#         scores.not.in.pathway <- geneList[list.genes.not.in.pathway]
-#         if (length(scores.in.pathway) > 0){
-#             p.value <- wilcox.test(scores.in.pathway, scores.not.in.pathway, alternative = "less")$p.value
-#         } else{
-#             p.value <- NA
-#         }
-#         return(c(p.value = p.value, Annotated = length(list.genes.in.pathway)))
-#     }
-# ))
-# 
-# # Assemble output table
-# outdat <- data.frame(pathway.code = rownames(pVals.by.pathway))
-# outdat$pathway.name <- pathways.list[paste0("path:", outdat$pathway.code)]
-# outdat$pathway.name <- gsub(" - Homo sapiens \\(human\\)", "", outdat$pathway.name)
-# outdat$p.value <- pVals.by.pathway[,"p.value"]
-# outdat$Annotated <- pVals.by.pathway[,"Annotated"]
-# outdat <- outdat[order(outdat$p.value),]
-# head(outdat)
-```
-
-
 
 
 # Session Info
