@@ -3,7 +3,7 @@ title: "Ganglioneuroma & Neuroblastoma - pathanalysis"
 author:
 - name: Arsenij Ustjanzew (arsenij.ustjanzew@uni-mainz.de)<br><a href='https://www.unimedizin-mainz.de/imbei/'>IMBEI,
     University Medical Center Mainz</a><br>
-date: "22.02.2023"
+date: "04.12.2023"
 output: 
   bookdown::html_document2:
     toc: true
@@ -193,9 +193,6 @@ ras_prob <- ras[r,] * transition_probability[r,]
 ras_prob_path <- ras[r,] * transition_probability_paths[r,]
 ras_prob_rec <- ras[r,] * transition_probability_rec[r,]
 
-ras_prob_up <- ras[r,] + (ras[r,] * transition_probability[r,])
-ras_prob_up_path <- ras[r,] + (ras[r,] * transition_probability_paths[r,])
-ras_prob_up_rec <- ras[r,] + (ras[r,] * transition_probability_rec[r,])
 ```
 
 # PCA exploration
